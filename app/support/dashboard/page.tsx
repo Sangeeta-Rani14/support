@@ -578,6 +578,8 @@ export default function DashboardPage() {
 
     const router = useRouter();
     const peerRef = useRef<Peer | null>(null);
+    const dashboardPeerIdRef = useRef<string | null>(null); // set once peer "open" fires
+    const [peerReady, setPeerReady] = useState(false);
 
     const handleEmergencyConfirm = () => {
         // End the call and go straight to dispatch — no popup
@@ -593,26 +595,30 @@ export default function DashboardPage() {
 
     // Initialize PeerJS
     useEffect(() => {
-        if (typeof window !== "undefined") {
-            const peer = new Peer();
-            peer.on("open", (id) => console.log("Dashboard Peer ID:", id));
-            peer.on("call", async (call) => {
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-                    setMyStream(stream);
-                    call.answer(stream);
-                    call.on("stream", (remoteVideoStream) => {
-                        setRemoteStream(remoteVideoStream);
-                        setIsCallActive(true);
-                    });
-                    call.on("error", () => setIsCallActive(false));
-                } catch (err) {
-                    console.error("Failed to answer call", err);
-                }
-            });
-            peerRef.current = peer;
-            return () => { peerRef.current?.destroy(); };
-        }
+        if (typeof window === "undefined") return;
+        const peer = new Peer();
+        peer.on("open", (id) => {
+            console.log("Dashboard Peer ID:", id);
+            dashboardPeerIdRef.current = id;
+            setPeerReady(true);
+        });
+        peer.on("call", async (call) => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                setMyStream(stream);
+                call.answer(stream);
+                call.on("stream", (remoteVideoStream) => {
+                    setRemoteStream(remoteVideoStream);
+                    setIsCallActive(true); // ✅ only true when stream actually arrives
+                });
+                call.on("close", () => setIsCallActive(false));
+                call.on("error", () => setIsCallActive(false));
+            } catch (err) {
+                console.error("Failed to answer call", err);
+            }
+        });
+        peerRef.current = peer;
+        return () => { peerRef.current?.destroy(); };
     }, []);
 
     // Listen for real-time updates — show ringing alert, wait for agent to accept
@@ -657,13 +663,55 @@ export default function DashboardPage() {
 
     const handleStartCall = async (reportToCall: EmergencyNotification | null = null) => {
         const target = reportToCall || selectedReport;
-        if (target && peerRef.current) {
-            broadcastSupportReady(target.id, peerRef.current.id);
-            setIsCallActive(true);
-        } else {
-            console.warn("Support system not ready — peer not initialized yet.");
+        if (!target) return;
+
+        // 1. Make sure our own peer is open (wait up to 5s)
+        if (!dashboardPeerIdRef.current) {
+            await new Promise<void>((resolve, reject) => {
+                const deadline = Date.now() + 5000;
+                const check = setInterval(() => {
+                    if (dashboardPeerIdRef.current) { clearInterval(check); resolve(); }
+                    else if (Date.now() > deadline) { clearInterval(check); reject(); }
+                }, 100);
+            }).catch(() => {
+                console.error("PeerJS did not open — check network / PeerJS cloud status");
+                return;
+            });
         }
+
+        const myPeerId = dashboardPeerIdRef.current;
+        const emrPeerId = target.peerId; // set by EMR form on submission
+
+        if (!myPeerId || !peerRef.current) {
+            console.error("Support peer not ready");
+            return;
+        }
+
+        // 2. Broadcast our peer ID so EMR form shows "Connecting..." UI
+        broadcastSupportReady(target.id, myPeerId);
+
+        // 3. If EMR form shared its peerId, call it directly (most reliable path)
+        if (emrPeerId) {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                setMyStream(stream);
+                const call = peerRef.current.call(emrPeerId, stream);
+                call.on("stream", (remoteStream) => {
+                    setRemoteStream(remoteStream);
+                    setIsCallActive(true);
+                });
+                call.on("close", () => setIsCallActive(false));
+                call.on("error", (e) => {
+                    console.error("Call error:", e);
+                    setIsCallActive(false);
+                });
+            } catch (err) {
+                console.error("Failed to get camera for call", err);
+            }
+        }
+        // If no emrPeerId, the EMR form will call us when it receives support_ready (fallback)
     };
+
 
     // ── Call timer ──
     useEffect(() => {

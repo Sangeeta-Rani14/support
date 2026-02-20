@@ -32,6 +32,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Video, Mic, MicOff, VideoOff, PhoneOff, MapPin, RotateCcw, Loader2, Clock, CheckCircle2, User } from "lucide-react";
 import Peer from "peerjs";
+import { submitEmrForm } from "@/lib/api";
 
 // ─── Inner component that uses useSearchParams ───────────────────────────────
 function EmergencyFormContent() {
@@ -43,6 +44,7 @@ function EmergencyFormContent() {
   const [condition, setCondition] = useState<string>("");
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
   const [incomingCall, setIncomingCall] = useState(false);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -69,7 +71,6 @@ function EmergencyFormContent() {
   // Form fields (pre-filled from user profile)
   const [name, setName] = useState("");
   const [mobile, setMobile] = useState("");
-  const [accidentType, setAccidentType] = useState("");
 
   const searchParams = useSearchParams();
   const userId = searchParams.get("userId");
@@ -118,6 +119,8 @@ function EmergencyFormContent() {
   const progressRef = useRef<NodeJS.Timeout | null>(null);
   const peerRef = useRef<Peer | null>(null);
   const peerIdRef = useRef<string | null>(null);
+  const liveStreamRef = useRef<MediaStream | null>(null); // holds camera stream during recording
+  const liveVideoRef = useRef<HTMLVideoElement | null>(null); // preview element
 
   // Initialize PeerJS on mount
   useEffect(() => {
@@ -186,48 +189,34 @@ function EmergencyFormContent() {
     );
   }, []);
 
-  // Listen for call signal from support
+  // Attach live camera stream once the <video> element mounts (recording=true renders it)
   useEffect(() => {
-    if (!reportId || !peerRef.current) return;
+    if (recording && liveVideoRef.current && liveStreamRef.current) {
+      liveVideoRef.current.srcObject = liveStreamRef.current;
+    }
+  }, [recording]);
 
+  // Listen for call signal from support
+  // The support dashboard calls peerRef.current.call(emrPeerId, stream) directly.
+  // Our peer.on("call") handler at lines 135-156 already handles that.
+  // We just need to surface the incoming call visually if support_ready is received
+  // but they've already called us (belt-and-suspenders: set UI state).
+  useEffect(() => {
+    if (!reportId) return;
     const cleanup = onEmergencyNotification((notification) => {
       if (
         notification.type === "support_ready" &&
         (notification as SupportReadyNotification).reportId === reportId
       ) {
-        const supportPeerId = (notification as SupportReadyNotification).supportPeerId;
+        // Support is ready — if we haven't already shown call UI, show connecting state
+        // The actual WebRTC call arrives via peer.on("call") — we just prime the UI
         setIncomingCall(true);
         setCallError(null);
-
-        navigator.mediaDevices
-          .getUserMedia({ video: { facingMode: "environment" }, audio: true })
-          .then((stream) => {
-            setMyStream(stream);
-            if (peerRef.current) {
-              const call = peerRef.current.call(supportPeerId, stream);
-              activeCallRef.current = call;
-              call.on("stream", (remoteVideoStream) => {
-                setRemoteStream(remoteVideoStream);
-              });
-              call.on("error", (err) => {
-                console.error("Call error:", err);
-                setCallError("Connection failed. Please tap Reconnect.");
-              });
-              call.on("close", () => {
-                // Support ended the call — redirect home
-                handleDisconnectAndRedirect();
-              });
-            }
-          })
-          .catch((err) => {
-            console.error("Failed to access camera", err);
-            setCallError("Camera access required for video call. Please allow access.");
-          });
       }
     });
-
     return cleanup;
   }, [reportId]);
+
 
   // Video recording
   const startRecording = async () => {
@@ -247,12 +236,17 @@ function EmergencyFormContent() {
       mediaRecorder.onstop = () => {
         const blob = new Blob(chunks, { type: "video/webm" });
         setVideoBlob(blob);
+        // stop all tracks and clear preview
         stream.getTracks().forEach((t) => t.stop());
+        liveStreamRef.current = null;
+        if (liveVideoRef.current) liveVideoRef.current.srcObject = null;
         setRecordingProgress(0);
         if (progressRef.current) clearInterval(progressRef.current);
       };
 
       mediaRecorder.start();
+      // Store the stream — the useEffect below will attach it once the <video> is mounted
+      liveStreamRef.current = stream;
       setRecording(true);
       setRecordingProgress(0);
 
@@ -277,10 +271,11 @@ function EmergencyFormContent() {
     }
   };
 
-  // Submit handler — sends data to backend (simulated) and broadcasts to support dashboard
+  // Submit handler — sends data to backend via axios, then notifies support dashboard
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setSubmitting(true);
+    setSubmitError(null);
 
     const formData = new FormData(e.currentTarget);
     formData.set("condition", condition);
@@ -288,20 +283,59 @@ function EmergencyFormContent() {
       formData.append("video", videoBlob, "emergency-video.webm");
     }
 
-    // Simulate API call to backend
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const reporterName = name || (formData.get("name") as string) || "Anonymous";
+    const reporterMobile = mobile || (formData.get("mobile") as string) || "N/A";
+    const notes = (formData.get("notes") as string) || "";
 
-    // Broadcast notification to support dashboard with full patient data
+    // ── 1. Send to external backend ─────────────────────────────────────────
+    let submissionId: string | undefined;
+    try {
+      const res = await submitEmrForm({
+        source: "support-one-psi",
+        userId: userProfile?.id ?? null,
+        patientId: userProfile?.scannerNumber ?? null,
+        evidenceCapture: {
+          photoUrl: userProfile?.photoUrl ?? null,
+          videoUrl: videoBlob ? "[video blob — upload separately]" : null,
+        },
+        victimCondition: {
+          currentCondition: condition || "unknown",
+          additionalNotes: notes,
+        },
+        reporterInfo: {
+          fullName: reporterName,
+          mobile: reporterMobile,
+        },
+      });
+      submissionId = res.submissionId;
+    } catch (err: unknown) {
+      const isNetworkError =
+        err && typeof err === "object" && "code" in err &&
+        (err as { code: string }).code === "ERR_NETWORK";
+      if (isNetworkError) {
+        // Backend offline — continue with local broadcast only
+        console.warn("Backend unreachable — falling back to local broadcast");
+      } else {
+        const msg =
+          err && typeof err === "object" && "response" in err
+            ? ((err as { response?: { data?: { message?: string } } }).response?.data?.message ?? "Submission failed")
+            : "Could not reach the server. Please try again.";
+        setSubmitError(msg);
+        setSubmitting(false);
+        return;
+      }
+    }
+
+    // ── 2. Notify support dashboard via BroadcastChannel ────────────────────
     const notification = broadcastEmergency({
-      reporter: name || (formData.get("name") as string) || "Anonymous",
-      phone: mobile || (formData.get("mobile") as string) || "N/A",
+      reporter: reporterName,
+      phone: reporterMobile,
       location: gps,
       condition: condition || "unknown",
-      notes: (formData.get("notes") as string) || "",
+      notes,
       peerId: peerIdRef.current || undefined,
-      // Patient profile data from QR scan
       bloodGroup: userProfile?.bloodGroup,
-      scannerNumber: userProfile?.scannerNumber,
+      scannerNumber: submissionId ?? userProfile?.scannerNumber,
       photoUrl: userProfile?.photoUrl,
       familyContact: userProfile?.familyContact,
       familyName: userProfile?.familyName,
@@ -719,17 +753,35 @@ function EmergencyFormContent() {
               </Label>
 
               {recording && (
-                <div className="space-y-1.5">
-                  <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                <div className="space-y-2">
+                  {/* Live camera preview */}
+                  <div className="relative w-full rounded-xl overflow-hidden bg-black border border-brand-emergency/30 shadow-md">
+                    <video
+                      ref={liveVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="w-full max-h-64 object-cover"
+                    />
+                    {/* REC badge */}
+                    <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-full">
+                      <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                      <span className="text-[11px] font-bold text-white uppercase tracking-wider">REC</span>
+                    </div>
+                    {/* Timer */}
+                    <div className="absolute top-2 right-2 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-full">
+                      <span className="text-[11px] font-mono text-white">
+                        {Math.round((recordingProgress / 100) * 30)}s / 30s
+                      </span>
+                    </div>
+                  </div>
+                  {/* Progress bar */}
+                  <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
                     <div
                       className="h-full bg-brand-emergency rounded-full transition-all duration-100"
                       style={{ width: `${recordingProgress}%` }}
                     />
                   </div>
-                  <p className="text-xs text-brand-emergency font-medium flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-brand-emergency animate-pulse" />
-                    Recording... {Math.round((recordingProgress / 100) * 30)}s / 30s
-                  </p>
                 </div>
               )}
 
@@ -963,7 +1015,18 @@ function EmergencyFormContent() {
         <input type="hidden" name="gps" value={gps} />
 
         {/* Submit */}
-        <div className="opacity-0 animate-slide-up stagger-4 pt-2">
+        <div className="opacity-0 animate-slide-up stagger-4 pt-2 space-y-3">
+          {/* API error banner */}
+          {submitError && (
+            <div className="flex items-start gap-2.5 px-4 py-3 bg-red-50 border border-red-200 rounded-xl animate-in fade-in slide-in-from-top-1 duration-200">
+              <span className="text-red-500 text-base leading-none mt-0.5">⚠️</span>
+              <div>
+                <p className="text-xs font-semibold text-red-700">Submission failed</p>
+                <p className="text-xs text-red-600 mt-0.5">{submitError}</p>
+              </div>
+            </div>
+          )}
+
           <Button
             type="submit"
             disabled={submitting || !otpVerified}
@@ -987,7 +1050,7 @@ function EmergencyFormContent() {
             )}
           </Button>
 
-          <p className="text-center text-xs text-muted-foreground mt-3">
+          <p className="text-center text-xs text-muted-foreground mt-1">
             Your location and report will be shared with emergency responders
           </p>
         </div>

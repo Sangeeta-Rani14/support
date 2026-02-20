@@ -339,7 +339,7 @@ function EmergencyFormContent() {
       photoUrl: userProfile?.photoUrl,
       familyContact: userProfile?.familyContact,
       familyName: userProfile?.familyName,
-      accidentType: accidentType || (formData.get("accidentType") as string) || "Unknown",
+      accidentType: (formData.get("accidentType") as string) || "Unknown",
     });
 
     if (notification) {

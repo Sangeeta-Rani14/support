@@ -16,6 +16,8 @@ import {
     AlertTriangle,
     Zap,
     Radio,
+    Video,
+    ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -30,6 +32,8 @@ import {
     CallStartedNotification,
     SupportReadyNotification,
 } from "@/lib/emergency-channel";
+import { isAuthenticated, clearTokens } from "@/lib/auth";
+import { useRouter } from "next/navigation";
 
 const sidebarLinks = [
     {
@@ -70,6 +74,7 @@ export default function DashboardLayout({
     children: React.ReactNode;
 }) {
     const pathname = usePathname();
+    const router = useRouter();
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [notificationCount, setNotificationCount] = useState(3);
     const [recentNotifications, setRecentNotifications] = useState<
@@ -77,12 +82,28 @@ export default function DashboardLayout({
     >([]);
     const [showNotifPanel, setShowNotifPanel] = useState(false);
 
+    // ─ Join-meeting popup state ────────────────────────────────────────────────
+    const [meetingAlert, setMeetingAlert] = useState<{
+        caseId: string;
+        reporter: string;
+        condition: string;
+    } | null>(null);
+
     // Listen for emergency notifications from the EMR form
     const handleNotification = useCallback(
         (notification: EmergencyNotification | CallStartedNotification | SupportReadyNotification) => {
             if (notification.type !== "new_report") return; // ignore call_started / support_ready
             setNotificationCount((prev) => prev + 1);
             setRecentNotifications((prev) => [notification, ...prev].slice(0, 10));
+
+            // Show join-meeting popup if caseId is present
+            if (notification.caseId) {
+                setMeetingAlert({
+                    caseId: notification.caseId,
+                    reporter: notification.reporter,
+                    condition: notification.condition,
+                });
+            }
 
 
             // Play notification sound (browser built-in)
@@ -179,6 +200,18 @@ export default function DashboardLayout({
         return cleanup;
     }, [handleNotification]);
 
+    useEffect(() => {
+        if (!isAuthenticated()) {
+            router.push("/login");
+        }
+    }, [router]);
+
+    const handleLogout = () => {
+        clearTokens();
+        toast.info("Logged out successfully");
+        router.push("/login");
+    };
+
     return (
         <div className="flex min-h-screen bg-[#FAFAFA]">
             {/* Sonner Toaster for notifications */}
@@ -193,6 +226,80 @@ export default function DashboardLayout({
                     },
                 }}
             />
+
+            {/* ─── JOIN MEETING POPUP ───────────────────────────────────────────── */}
+            {meetingAlert && (
+                <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-300">
+                    <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-300">
+                        {/* Top accent bar */}
+                        <div className="h-1.5 bg-gradient-to-r from-brand-success via-emerald-400 to-teal-500" />
+
+                        <div className="p-6">
+                            {/* Icon + title */}
+                            <div className="flex items-start gap-4 mb-5">
+                                <div className="w-12 h-12 rounded-full bg-brand-success/15 flex items-center justify-center shrink-0">
+                                    <Video className="w-6 h-6 text-brand-success" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-base font-bold text-foreground leading-tight">
+                                        Emergency Meeting Ready
+                                    </p>
+                                    <p className="text-sm text-muted-foreground mt-1">
+                                        <span className="font-semibold text-foreground">{meetingAlert.reporter}</span>
+                                        {" "}
+                                        has submitted an EMR report and is waiting in the video room.
+                                    </p>
+                                </div>
+                            </div>
+
+                            {/* Case info */}
+                            <div className="bg-slate-50 rounded-xl p-3.5 mb-5 space-y-2">
+                                <div className="flex justify-between text-xs">
+                                    <span className="text-muted-foreground">Room / Case ID</span>
+                                    <span className="font-mono font-semibold text-foreground text-right truncate max-w-[60%]">{meetingAlert.caseId}</span>
+                                </div>
+                                <div className="flex justify-between text-xs">
+                                    <span className="text-muted-foreground">Condition</span>
+                                    <span
+                                        className={`font-semibold capitalize ${meetingAlert.condition === "critical"
+                                            ? "text-brand-emergency"
+                                            : meetingAlert.condition === "injured"
+                                                ? "text-amber-600"
+                                                : "text-brand-success"
+                                            }`}
+                                    >
+                                        {meetingAlert.condition}
+                                    </span>
+                                </div>
+                            </div>
+
+                            {/* Actions */}
+                            <div className="flex gap-3">
+                                <button
+                                    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-brand-success text-white text-sm font-semibold hover:bg-emerald-600 transition-colors shadow-md shadow-brand-success/25"
+                                    onClick={() => {
+                                        window.open(
+                                            `/video-call?room=${encodeURIComponent(meetingAlert.caseId)}&name=${encodeURIComponent("Support Agent")}&role=support`,
+                                            "_blank"
+                                        );
+                                        setMeetingAlert(null);
+                                    }}
+                                >
+                                    <Video className="w-4 h-4" />
+                                    Join Meeting
+                                    <ExternalLink className="w-3 h-3 opacity-70" />
+                                </button>
+                                <button
+                                    className="px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-muted/50 transition-colors"
+                                    onClick={() => setMeetingAlert(null)}
+                                >
+                                    Dismiss
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Mobile overlay */}
             {sidebarOpen && (
@@ -281,7 +388,10 @@ export default function DashboardLayout({
                             <p className="text-[10px] text-muted-foreground">Full access</p>
                         </div>
                     </div>
-                    <button className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-muted-foreground hover:text-brand-emergency hover:bg-brand-emergency/5 transition-all w-full">
+                    <button
+                        onClick={handleLogout}
+                        className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-muted-foreground hover:text-brand-emergency hover:bg-brand-emergency/5 transition-all w-full"
+                    >
                         <LogOut className="h-4 w-4" />
                         Logout
                     </button>

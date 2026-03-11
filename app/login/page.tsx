@@ -7,7 +7,7 @@ import {
     Loader2,
     ShieldCheck,
     KeyRound,
-    Mail,
+    Phone,
     ArrowRight,
     AlertCircle
 } from "lucide-react";
@@ -15,31 +15,41 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { login, ApiError } from "@/lib/api";
+import { setTokens, isAuthenticated } from "@/lib/auth";
+import { toast } from "sonner";
+import { useEffect } from "react";
 
 
-export default function SupportLoginPage() {
+export default function LoginPage() {
     const router = useRouter();
-    const [email, setEmail] = useState("");
+    const [mobile, setMobile] = useState("");
     const [password, setPassword] = useState("");
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const validateEmail = (email: string) => {
-        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    const validateMobile = (mobile: string) => {
+        return /^[0-9]{10}$/.test(mobile);
     };
+
+    useEffect(() => {
+        if (isAuthenticated()) {
+            router.push("/support/dashboard");
+        }
+    }, [router]);
 
     const handeSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setError(null);
 
         // Basic Validations
-        if (!email || !password) {
+        if (!mobile || !password) {
             setError("Please fill in all fields.");
             return;
         }
 
-        if (!validateEmail(email)) {
-            setError("Please enter a valid email address.");
+        if (!validateMobile(mobile)) {
+            setError("Please enter a valid 10-digit mobile number.");
             return;
         }
 
@@ -50,14 +60,39 @@ export default function SupportLoginPage() {
 
         setIsLoading(true);
 
-        // Simulate API call
         try {
-            await new Promise((resolve) => setTimeout(resolve, 1500));
+            console.log("Attempting login...");
+            const response = await login({ mobile, password });
+            console.log("Login response received:", response);
 
-            // Success - Redirect to dashboard
-            router.push("/support/dashboard");
+            // Extract tokens from common response locations (data wrapper or top level)
+            const resp = response as any;
+            const token = resp?.data?.token || resp?.data?.accessToken || resp?.token || resp?.accessToken || resp?.access_token;
+            const refreshToken = resp?.data?.refreshToken || resp?.data?.refresh_token || resp?.refreshToken || resp?.refresh_token;
+
+            console.log("Extracted token:", token ? "Exists" : "Missing");
+            console.log("Extracted refreshToken:", refreshToken ? "Exists" : "Missing");
+
+            if (token) {
+                // Success - Save tokens (even if refreshToken is missing, we can try to proceed)
+                setTokens(token, refreshToken || "");
+
+                toast.success("Login successful! Redirecting...");
+                console.log("Redirecting to /support/dashboard...");
+
+                // Use window.location.href for a hard redirect to ensure auth state is fresh
+                window.location.href = "/support/dashboard";
+            } else {
+                console.warn("No token found in response");
+                setError(response?.message || "Login failed. Invalid response from server.");
+            }
         } catch (err) {
-            setError("An unexpected error occurred. Please try again.");
+            console.error("Login Error:", err);
+            if (err instanceof ApiError) {
+                setError(err.message);
+            } else {
+                setError("An unexpected error occurred. Please try again.");
+            }
         } finally {
             setIsLoading(false);
         }
@@ -98,16 +133,16 @@ export default function SupportLoginPage() {
                         )}
 
                         <div className="space-y-2">
-                            <Label htmlFor="email">Email Address</Label>
+                            <Label htmlFor="mobile">Mobile Number</Label>
                             <div className="relative">
-                                <Mail className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                                <Phone className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                                 <Input
-                                    id="email"
-                                    type="email"
-                                    placeholder="name@example.com"
+                                    id="mobile"
+                                    type="tel"
+                                    placeholder="9110137609"
                                     className="pl-9 h-10 border-input bg-white/50 focus:bg-white transition-all"
-                                    value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
+                                    value={mobile}
+                                    onChange={(e) => setMobile(e.target.value)}
                                     disabled={isLoading}
                                 />
                             </div>

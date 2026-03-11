@@ -23,14 +23,13 @@ export interface EmergencyNotification {
     type: "new_report";
     photo?: File | null;
     video?: Blob | null;
-    peerId?: string;
-    // Extended patient data from QR scan
     bloodGroup?: string;
     scannerNumber?: string;
     photoUrl?: string;
     familyContact?: string;
     familyName?: string;
     accidentType?: string;
+    caseId?: string;        // Room name (from API response caseId)
 }
 
 const CHANNEL_NAME = "jan-setu-emergency";
